@@ -3,10 +3,10 @@
 const CONFIG = window.RADIO_CONFIG || {};
 
 // RADIO NAME
-const RADIO_NAME = CONFIG.RADIO_NAME || 'Jailson Web Rádio';
+const RADIO_NAME = CONFIG.RADIO_NAME || 'The Sound Station';
 
 // Change Stream URL Here, Supports, ICECAST, ZENO, SHOUTCAST, RADIOJAR and any other stream service.
-const URL_STREAMING = CONFIG.URL_STREAMING || 'https://stream.zeno.fm/yn65fsaurfhvv';
+const URL_STREAMING = CONFIG.URL_STREAMING || 'https://sound-station.volticast.net/primary';
 
 //API URL /
 const API_URL = CONFIG.API_URL || 'https://api.twj.es/?url='+URL_STREAMING;
