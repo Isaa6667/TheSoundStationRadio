@@ -27,6 +27,19 @@ const cache = {};
 // "now playing" (data.albumArt). O histórico reaproveita essa mesma capa em
 // vez de buscar de novo no iTunes/search.php, evitando que a mesma música
 // apareça com capas diferentes na tela principal e no histórico.
+
+const popoutBtn = document.querySelector(".popout-btn");
+
+if (popoutBtn) {
+    popoutBtn.addEventListener("click", function () {
+        window.open(
+            window.location.href,
+            "SoundStationPlayer",
+            "width=450,height=700,resizable=yes,scrollbars=no"
+        );
+    });
+}
+
 const nowPlayingArtCache = {};
 
 window.addEventListener('load', () => {
