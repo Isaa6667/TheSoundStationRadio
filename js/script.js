@@ -399,8 +399,8 @@ function handleClipTrack(data, song, artist) {
     const np = data.now_playing || {};
     clipTrack = yt ? { id: yt, song, artist, elapsed: np.elapsed || 0, duration: np.duration || 0, receivedAt: Date.now() } : null;
 
-//    const btn = document.querySelector('.clip-toggle');
-//    if (btn && yt) btn.hidden = false; // a API suporta clipes: revela o botão
+const btn = document.querySelector('.clip-toggle');
+if (btn && yt) btn.hidden = false; // a API suporta clipes: revela o botão
 
     // Um clipe do histórico está tocando: não troca o vídeo por baixo do
     // usuário — quando ele terminar, o watcher volta para a programação
