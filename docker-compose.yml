@@ -1,0 +1,19 @@
+services:
+  radioplayer:
+    # Para usar a imagem pronta, troque o build por:
+    # image: ghcr.io/jailsonsb2/radioplayer:latest
+    build: .
+    image: ghcr.io/jailsonsb2/radioplayer:latest
+    container_name: radioplayer
+    ports:
+      - "8080:80"
+    environment:
+      RADIO_NAME: "Jailson Web Rádio"
+      URL_STREAMING: "https://stream.zeno.fm/yn65fsaurfhvv"
+      # ACCENT_COLOR: "#00e1e7"
+      # BG_COLOR: "#0b0e13"
+      # THEME_COLOR: "#0b0e13"
+    # Logo da sua rádio (192x192 ou maior, quadrado)
+    # volumes:
+    #   - ./cover.png:/usr/share/nginx/html/img/cover.png:ro
+    restart: unless-stopped

@@ -1,0 +1,8 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Arquivos consumidos dentro do container Linux: CRLF quebra o shebang do
+# entrypoint e a configuração do nginx.
+*.sh text eol=lf
+Dockerfile text eol=lf
+docker/* text eol=lf
