@@ -9,30 +9,16 @@
     <meta name="description" content="The Sound Station HTML5 player: now playing with album cover, lyrics, history, YouTube clip, and installable app (PWA). Compatible with Icecast, Shoutcast, Zeno.FM, and Azuracast — no API key required.">
     <meta name="keywords" content="the sound station, radio player, online radio, html5 radio player, web radio, icecast, shoutcast, zeno fm, azuracast, radio streaming, now playing, pwa">
 
-    <link rel="canonical" href="https://jailsonsb2.github.io/RadioPlayer/">
+    <link rel="canonical" href="#">
 
     <meta property="og:type" content="website">
     <meta property="og:title" content="The Sound Station — Online Radio Player">
     <meta property="og:description" content="The Sound Station HTML5 player: now playing with cover, lyrics, history, YouTube clip, and PWA.">
-    <meta property="og:url" content="https://jailsonsb2.github.io/RadioPlayer/">
-    <meta property="og:image" content="https://jailsonsb2.github.io/RadioPlayer/img/cover.png">
+    <meta property="og:url" content="#">
+    <meta property="og:image" content="img/cover.png">
 
     <meta name="twitter:card" content="summary_large_image">
     <meta name="theme-color" content="#0b0e13">
-
-    <script type="application/ld+json">
-    {
-        "@context": "https://schema.org",
-        "@type": "WebApplication",
-        "name": "The Sound Station Player",
-        "url": "https://jailsonsb2.github.io/RadioPlayer/",
-        "applicationCategory": "MultimediaApplication",
-        "operatingSystem": "Web",
-        "offers": { "@type": "Offer", "price": "0" },
-        "description": "The Sound Station HTML5 radio player: now playing with album cover, lyrics, history, YouTube clip, and PWA.",
-        "author": { "@type": "Person", "name": "Jailson Bezerra", "url": "https://github.com/jailsonsb2" }
-    }
-    </script>
 
     <link rel="icon" type="image/png" href="img/cover.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -122,11 +108,7 @@
             </div>
         </section>
 
-        <footer class="partner">
-            <a href="https://volticast.com/r/sound-station" target="_blank" rel="noopener">
-                <img src="img/radiosnet.png" alt="Listen on RadiosNet — download the app" width="234" height="60">
-            </a>
-        </footer>
+        <!-- Footer removed -->
     </main>
 
     <div id="modalLyrics" role="dialog" aria-modal="true" aria-labelledby="lyricsSong" aria-hidden="true">
@@ -143,57 +125,6 @@
 
     <script type="text/javascript" src="config.js"></script>
     <script type="text/javascript" src="js/script.js"></script>
-
-    <script>
-        // Lyrics modal
-        (function () {
-            var modal = document.getElementById('modalLyrics');
-            var openButton = document.querySelector('.lyrics');
-
-            function closeModal() {
-                modal.style.display = 'none';
-                modal.setAttribute('aria-hidden', 'true');
-                document.body.classList.remove('modal-open');
-            }
-
-            openButton.addEventListener('click', function (event) {
-                event.preventDefault();
-                if (!openButton.hasAttribute('data-toggle')) return;
-                modal.style.display = 'flex';
-                modal.setAttribute('aria-hidden', 'false');
-                document.body.classList.add('modal-open');
-            });
-
-            modal.addEventListener('click', function (event) {
-                if (event.target === modal) closeModal();
-            });
-            modal.querySelector('.modal-close').addEventListener('click', closeModal);
-            document.addEventListener('keydown', function (event) {
-                if (event.key === 'Escape') closeModal();
-            });
-        })();
-
-        // Volume popover
-        (function () {
-            var wrap = document.querySelector('.volume-wrap');
-            var toggle = document.querySelector('.volume-toggle');
-            var popover = document.querySelector('.volume-popover');
-            if (!wrap || !toggle || !popover) return;
-
-            toggle.addEventListener('click', function () {
-                popover.hidden = !popover.hidden;
-            });
-            document.addEventListener('click', function (event) {
-                if (!wrap.contains(event.target)) popover.hidden = true;
-            });
-        })();
-
-        if ('serviceWorker' in navigator) {
-            window.addEventListener('load', function () {
-                navigator.serviceWorker.register('service-worker.js');
-            });
-        }
-    </script>
 
 </body>
 </html>
