@@ -1,1023 +1,1585 @@
-// A configuração vem do config.js (que o Docker gera a partir das variáveis de
-// ambiente). Os valores abaixo são o fallback usado quando não há config.js.
-const CONFIG = window.RADIO_CONFIG || {};
+const CONFIG = window.RADIO_CONFIG || {}
 
-// RADIO NAME
-const RADIO_NAME = CONFIG.RADIO_NAME || 'The Sound Station';
+const RADIO_NAME = CONFIG.RADIO_NAME || "The Sound Station"
+const URL_STREAMING = CONFIG.URL_STREAMING || "https://sound-station.volticast.net/primary"
 
-// Change Stream URL Here, Supports, ICECAST, ZENO, SHOUTCAST, RADIOJAR and any other stream service.
-const URL_STREAMING = CONFIG.URL_STREAMING || 'https://sound-station.volticast.net/primary';
+const API_URL = CONFIG.API_URL || "https://api.twj.es/?url=" + URL_STREAMING
+const FALLBACK_API_URL = CONFIG.FALLBACK_API_URL || "https://api.twj.es/metadata/?url=" + URL_STREAMING
 
-//API URL /
-const API_URL = CONFIG.API_URL || 'https://api.twj.es/?url='+URL_STREAMING;
-const FALLBACK_API_URL = CONFIG.FALLBACK_API_URL || 'https://api.twj.es/metadata/?url=' + URL_STREAMING;
-
-// Tema opcional (usado pelas variáveis de ambiente do Docker)
-if (CONFIG.ACCENT_COLOR) document.documentElement.style.setProperty('--accent', CONFIG.ACCENT_COLOR);
-if (CONFIG.BG_COLOR) document.documentElement.style.setProperty('--bg', CONFIG.BG_COLOR);
-
-let userInteracted = true;
-
-let musicaAtual = null;
-
-// Cache para a API do iTunes
-const cache = {};
-
-// Guarda a capa que a API usou para cada música enquanto ela tocava como
-// "now playing" (data.albumArt). O histórico reaproveita essa mesma capa em
-// vez de buscar de novo no iTunes/search.php, evitando que a mesma música
-// apareça com capas diferentes na tela principal e no histórico.
-
-const popoutBtn = document.querySelector(".popout-btn");
-
-if (popoutBtn) {
-    popoutBtn.addEventListener("click", function () {
-        window.open(
-            window.location.href,
-            "SoundStationPlayer",
-            "width=450,height=700,resizable=yes,scrollbars=no"
-        );
-    });
+if (CONFIG.ACCENT_COLOR) {
+    document.documentElement.style.setProperty("--accent", CONFIG.ACCENT_COLOR)
 }
 
-const nowPlayingArtCache = {};
+if (CONFIG.BG_COLOR) {
+    document.documentElement.style.setProperty("--bg", CONFIG.BG_COLOR)
+}
 
-window.addEventListener('load', () => {
-    const page = new Page();
-    page.changeTitlePage();
-    page.setVolume();
+let musicaAtual = null
+let audio = new Audio(URL_STREAMING)
 
-    const radioName = document.getElementById('radioName');
-    if (radioName) radioName.textContent = RADIO_NAME;
+let isIntentionalPause = true
+let reconnectAttempts = 0
+let reconnectTimeout = null
+let fadeInterval = null
 
-    const player = new Player();
-    player.play();
+const cache = {}
+const lyricsCache = {}
+const nowPlayingArtCache = {}
 
-    // Chama a função getStreamingData imediatamente quando a página carrega
-    getStreamingData();
+let clipTrack = null
+let lastClipShownId = null
+let clipWasRadioPlaying = false
+let historyClipActive = false
+const clipPlayingSet = new Set()
 
-    // Define o intervalo para atualizar os dados de streaming a cada 10 segundos
-    const streamingInterval = setInterval(getStreamingData, 10000);
+function normalizeText(text) {
+    return (text || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .trim()
+}
 
-    // A altura da capa é responsabilidade do CSS (aspect-ratio).
-});
+function intToDecimal(value) {
+    return Number(value) / 100
+}
 
-// Cache de letras: guarda a própria Promise (não só o resultado) para que
-// duas chamadas quase simultâneas para a mesma música reaproveitem a mesma
-// requisição em vez de martelar as APIs de novo.
-const lyricsCache = {};
+function decimalToInt(value) {
+    return Math.round(Number(value) * 100)
+}
 
-function fetchLyrics(currentArtist, currentSong) {
-    const cacheKey = (currentArtist + ' - ' + currentSong).toLowerCase();
-    if (lyricsCache[cacheKey]) {
-        return lyricsCache[cacheKey];
+function changeImageSize(url, size) {
+    const parts = url.split("/")
+    const filename = parts.pop()
+    const extension = filename.substring(filename.lastIndexOf("."))
+    return parts.join("/") + "/" + size + extension
+}
+
+class Page {
+    changeTitlePage(title = RADIO_NAME) {
+        document.title = title
     }
 
-    const promise = (async function () {
-        // A API do Vagalume foi descontinuada — busca em lyrics.ovh e,
-        // se não encontrar, no LRCLIB (nenhuma exige chave de API).
-        let lyric = null;
+    changeVolumeIndicator(volume) {
+        const indicator = document.getElementById("volIndicator")
+
+        if (indicator) {
+            indicator.textContent = volume
+        }
+
+        localStorage.setItem("volume", volume)
+    }
+
+    setVolume() {
+        const slider = document.getElementById("volume")
+        const indicator = document.getElementById("volIndicator")
+
+        if (!slider) return
+
+        const savedVolume = localStorage.getItem("volume") || 80
+
+        slider.value = savedVolume
+
+        if (indicator) {
+            indicator.textContent = savedVolume
+        }
+
+        audio.volume = intToDecimal(savedVolume)
+    }
+
+    refreshCurrentSong(song, artist) {
+        const currentSong = document.getElementById("currentSong")
+        const currentArtist = document.getElementById("currentArtist")
+        const lyricsSong = document.getElementById("lyricsSong")
+
+        if (!currentSong || !currentArtist) return
+
+        if (
+            currentSong.textContent === song &&
+            currentArtist.textContent === artist
+        ) {
+            return
+        }
+
+        currentSong.classList.add("fade-out")
+        currentArtist.classList.add("fade-out")
+
+        setTimeout(function () {
+            currentSong.textContent = song
+            currentArtist.textContent = artist
+
+            if (lyricsSong) {
+                lyricsSong.textContent = song + " - " + artist
+            }
+
+            currentSong.classList.remove("fade-out")
+            currentArtist.classList.remove("fade-out")
+
+            currentSong.classList.add("fade-in")
+            currentArtist.classList.add("fade-in")
+
+            setTimeout(function () {
+                currentSong.classList.remove("fade-in")
+                currentArtist.classList.remove("fade-in")
+            }, 500)
+        }, 300)
+    }
+
+    async refreshCover(song, artist, apiArt = null) {
+        const coverArt = document.getElementById("currentCoverArt")
+        const background = document.getElementById("bgCover")
+        const defaultCover = "img/cover.png"
+
+        if (!coverArt || !background) return
+
         try {
-            const response = await fetch('https://api.lyrics.ovh/v1/' + encodeURIComponent(currentArtist) + '/' + encodeURIComponent(currentSong));
-            const data = await response.json();
-            if (data && data.lyrics) lyric = data.lyrics;
+            let art = defaultCover
+            let cover = defaultCover
+
+            if (apiArt) {
+                art = apiArt
+                cover = apiArt.replace("600x600", "1500x1500")
+            } else {
+                const data = await getCoverData(
+                    artist,
+                    song,
+                    defaultCover,
+                    defaultCover
+                )
+
+                art = data.art
+                cover = data.cover
+            }
+
+            coverArt.style.backgroundImage = "url('" + art + "')"
+            background.style.backgroundImage = "url('" + cover + "')"
+
+            if (art !== defaultCover) {
+                const key =
+                    normalizeText(artist) +
+                    "|" +
+                    normalizeText(song)
+
+                nowPlayingArtCache[key] = {
+                    art: art,
+                    cover: cover,
+                    thumbnail: art
+                }
+            }
+
+            coverArt.classList.add("animated", "bounceInLeft")
+
+            setTimeout(function () {
+                coverArt.classList.remove("animated", "bounceInLeft")
+            }, 2000)
+
+            if ("mediaSession" in navigator) {
+                navigator.mediaSession.metadata = new MediaMetadata({
+                    title: song,
+                    artist: artist,
+                    artwork: [
+                        {
+                            src: art,
+                            sizes: "512x512",
+                            type: "image/png"
+                        }
+                    ]
+                })
+            }
+        } catch (error) {
+            console.log("Cover error:", error)
+        }
+    }
+
+    async refreshHistoric(info, article) {
+        const cover = article.querySelector(".cover-historic")
+
+        if (!cover) return
+
+        const song =
+            typeof info.song === "object"
+                ? info.song.title
+                : info.song
+
+        const artist =
+            typeof info.artist === "object"
+                ? info.artist.title
+                : info.artist
+
+        const defaultCover = "img/cover.png"
+
+        try {
+            const key =
+                normalizeText(artist) +
+                "|" +
+                normalizeText(song)
+
+            const data =
+                nowPlayingArtCache[key] ||
+                await getCoverData(
+                    artist,
+                    song,
+                    defaultCover,
+                    defaultCover
+                )
+
+            cover.style.backgroundImage =
+                "url('" +
+                (data.thumbnail || data.art || defaultCover) +
+                "')"
+        } catch (error) {
+            cover.style.backgroundImage =
+                "url('" + defaultCover + "')"
+        }
+    }
+}
+
+async function fetchLyrics(artist, song) {
+    const key =
+        normalizeText(artist) +
+        " - " +
+        normalizeText(song)
+
+    if (lyricsCache[key]) {
+        return lyricsCache[key]
+    }
+
+    const request = (async function () {
+        try {
+            const response = await fetch(
+                "https://api.lyrics.ovh/v1/" +
+                encodeURIComponent(artist) +
+                "/" +
+                encodeURIComponent(song)
+            )
+
+            if (response.ok) {
+                const data = await response.json()
+
+                if (data.lyrics) {
+                    return data.lyrics
+                }
+            }
         } catch (error) {}
 
-        if (!lyric) {
-            try {
-                const response = await fetch('https://lrclib.net/api/get?artist_name=' + encodeURIComponent(currentArtist) + '&track_name=' + encodeURIComponent(currentSong));
-                if (response.ok) {
-                    const data = await response.json();
-                    lyric = data.plainLyrics || data.syncedLyrics || null;
+        try {
+            const response = await fetch(
+                "https://lrclib.net/api/get?artist_name=" +
+                encodeURIComponent(artist) +
+                "&track_name=" +
+                encodeURIComponent(song)
+            )
+
+            if (response.ok) {
+                const data = await response.json()
+
+                if (data.plainLyrics) {
+                    return data.plainLyrics
                 }
-            } catch (error) {}
-        }
 
-        if (!lyric) {
-            try {
-                const response = await fetch('https://lrclib.net/api/search?track_name=' + encodeURIComponent(currentSong) + '&artist_name=' + encodeURIComponent(currentArtist));
-                if (response.ok) {
-                    const results = await response.json();
-                    const hit = Array.isArray(results) && results.find((r) => r.plainLyrics || r.syncedLyrics);
-                    if (hit) lyric = hit.plainLyrics || hit.syncedLyrics;
+                if (data.syncedLyrics) {
+                    return data.syncedLyrics
                 }
-            } catch (error) {}
-        }
+            }
+        } catch (error) {}
 
-        return lyric;
-    })();
+        try {
+            const response = await fetch(
+                "https://lrclib.net/api/search?track_name=" +
+                encodeURIComponent(song) +
+                "&artist_name=" +
+                encodeURIComponent(artist)
+            )
 
-    lyricsCache[cacheKey] = promise;
-    return promise;
+            if (response.ok) {
+                const results = await response.json()
+
+                if (Array.isArray(results)) {
+                    const result = results.find(function (item) {
+                        return item.plainLyrics || item.syncedLyrics
+                    })
+
+                    if (result) {
+                        return result.plainLyrics || result.syncedLyrics
+                    }
+                }
+            }
+        } catch (error) {}
+
+        return null
+    })()
+
+    lyricsCache[key] = request
+
+    return request
 }
 
-// DOM control
-class Page {
-    constructor() {
-        this.changeTitlePage = function (title = RADIO_NAME) {
-            document.title = title;
-        };
+async function getCoverData(artist, title, defaultArt, defaultCover) {
+    const search = await getDataFromSearch(
+        artist,
+        title,
+        defaultArt,
+        defaultCover
+    )
 
-        this.refreshCurrentSong = function(song, artist) {
-            const currentSong = document.getElementById('currentSong');
-            const currentArtist = document.getElementById('currentArtist');
-            const lyricsSong = document.getElementById('lyricsSong');
-        
-            if (song !== currentSong.textContent || artist !== currentArtist.textContent) { 
-                // Esmaecer o conteúdo existente (fade-out)
-                currentSong.classList.add('fade-out');
-                currentArtist.classList.add('fade-out');
-        
-                setTimeout(function() {
-                    // Atualizar o conteúdo após o fade-out
-                    currentSong.textContent = song; 
-                    currentArtist.textContent = artist;
-                    lyricsSong.textContent = song + ' - ' + artist;
-        
-                    // Esmaecer o novo conteúdo (fade-in)
-                    currentSong.classList.remove('fade-out');
-                    currentSong.classList.add('fade-in');
-                    currentArtist.classList.remove('fade-out');
-                    currentArtist.classList.add('fade-in');
-                }, 500); 
-        
-                setTimeout(function() {
-                    // Remover as classes fade-in após a animação
-                    currentSong.classList.remove('fade-in');
-                    currentArtist.classList.remove('fade-in');
-                }, 1000); 
+    if (search) {
+        return search
+    }
+
+    return getDataFromITunes(
+        artist,
+        title,
+        defaultArt,
+        defaultCover
+    )
+}
+
+async function getDataFromSearch(
+    artist,
+    title,
+    defaultArt,
+    defaultCover
+) {
+    const text =
+        artist === title
+            ? title
+            : artist + " - " + title
+
+    const key = "search:" + text.toLowerCase()
+
+    if (cache[key]) {
+        return cache[key]
+    }
+
+    try {
+        const response = await fetch(
+            "https://api.twj.es/search.php?query=" +
+            encodeURIComponent(text)
+        )
+
+        if (!response.ok) {
+            return null
+        }
+
+        const data = await response.json()
+
+        if (data.results && data.results.artwork) {
+            const result = {
+                title: title,
+                artist: artist,
+                thumbnail: data.results.artwork,
+                art: data.results.artwork,
+                cover: data.results.artwork,
+                stream_url: data.results.stream_url || ""
             }
-        };
-          
-        // Busca a capa de um card do histórico. Recebe o próprio elemento
-        // <article> (o texto já foi preenchido na criação do card).
-        this.refreshHistoric = async function (info, article) {
-            const coverHistoric = article.querySelector(".cover-historic");
-            const defaultCoverArt = "img/cover.png";
 
-            // Extrai o título da música e o nome do artista,
-            // tratando a possibilidade de 'song' e 'artist' serem objetos ou strings.
-            const songTitle = typeof info.song === "object" ? info.song.title : info.song;
-            const songArtist = typeof info.artist === "object" ? info.artist.title : info.artist;
+            cache[key] = result
 
-            try {
-                const cacheKey = normalizeText(songArtist) + '|' + normalizeText(songTitle);
-                const data = nowPlayingArtCache[cacheKey] || await getCoverData(songArtist, songTitle, defaultCoverArt, defaultCoverArt);
-                coverHistoric.style.backgroundImage = "url(" + (data.thumbnail || data.art || defaultCoverArt) + ")";
-            } catch (error) {
-                console.error("Erro ao buscar capa do histórico:", error);
-                coverHistoric.style.backgroundImage = "url(" + defaultCoverArt + ")";
+            return result
+        }
+    } catch (error) {}
+
+    return null
+}
+
+async function getDataFromITunes(
+    artist,
+    title,
+    defaultArt,
+    defaultCover
+) {
+    const text =
+        artist === title
+            ? title
+            : artist + " " + title
+
+    const key = "itunes:" + text.toLowerCase()
+
+    if (cache[key]) {
+        return cache[key]
+    }
+
+    try {
+        const response = await fetch(
+            "https://itunes.apple.com/search?limit=1&media=music&entity=song&term=" +
+            encodeURIComponent(text)
+        )
+
+        if (!response.ok) {
+            return {
+                title: title,
+                artist: artist,
+                art: defaultArt,
+                cover: defaultCover
             }
-        };
-                
-        this.refreshCover = async function (song = '', artist, apiArt = null) {
-            const coverArt = document.getElementById('currentCoverArt');
-            const coverBackground = document.getElementById('bgCover');
-            const defaultCoverArt = 'img/cover.png';
+        }
 
-            try {
-                let art;
-                let cover;
+        const data = await response.json()
 
-                if (apiArt) {
-                    // A API do twj.es já entrega a capa pronta (albumArt) —
-                    // usar direto evita uma busca extra e capas erradas
-                    // por fuzzy match
-                    art = apiArt;
-                    cover = apiArt.replace('600x600', '1500x1500');
-                } else {
-                    const data = await getCoverData(artist, song, defaultCoverArt, defaultCoverArt);
-                    art = data.art;
-                    cover = data.cover;
-                }
-
-                // Aplica a imagem de capa (sempre, mesmo se for a padrão)
-                coverArt.style.backgroundImage = 'url(' + art + ')';
-                coverBackground.style.backgroundImage = 'url(' + cover + ')';
-
-                // Lembra qual capa foi usada para esta música tocando agora,
-                // para o histórico reaproveitar quando ela aparecer lá
-                if (art && art !== defaultCoverArt) {
-                    const cacheKey = normalizeText(artist) + '|' + normalizeText(song);
-                    nowPlayingArtCache[cacheKey] = { art, cover, thumbnail: art };
-                }
-
-                // Adiciona/remove classes para animação (se necessário)
-                coverArt.classList.add('animated', 'bounceInLeft');
-                setTimeout(() => coverArt.classList.remove('animated', 'bounceInLeft'), 2000);
-
-                // Atualiza MediaSession (se suportado)
-                if ('mediaSession' in navigator) {
-                    const artwork = [
-                        { src: art, sizes: '96x96',   type: 'image/png' },
-                        { src: art, sizes: '128x128', type: 'image/png' },
-                        { src: art, sizes: '192x192', type: 'image/png' },
-                        { src: art, sizes: '256x256', type: 'image/png' },
-                        { src: art, sizes: '384x384', type: 'image/png' },
-                        { src: art, sizes: '512x512', type: 'image/png' },
-                    ];
-
-                    navigator.mediaSession.metadata = new MediaMetadata({
-                        title: song,
-                        artist: artist,
-                        artwork
-                    });
-                }
-            } catch (error) {
-                console.log("Erro ao buscar a capa:", error);
+        if (!data.results || !data.results.length) {
+            return {
+                title: title,
+                artist: artist,
+                art: defaultArt,
+                cover: defaultCover
             }
-        };
+        }
 
-        this.changeVolumeIndicator = function(volume) {
-            document.getElementById('volIndicator').textContent = volume; // Use textContent em vez de innerHTML
-          
-            if (typeof Storage !== 'undefined') {
-              localStorage.setItem('volume', volume);
-            }
-          };
-          
-        this.setVolume = function() {
-            if (typeof Storage !== 'undefined') {
-              const volumeLocalStorage = localStorage.getItem('volume') || 80; // Operador de coalescência nula (??)
-          
-              document.getElementById('volume').value = volumeLocalStorage;
-              document.getElementById('volIndicator').textContent = volumeLocalStorage;
-            }
-          };
+        const item = data.results[0]
 
-        this.refreshLyric = async function (currentSong, currentArtist) {
-            const openLyric = document.getElementsByClassName('lyrics')[0];
-            const modalLyric = document.getElementById('modalLyrics');
+        const result = {
+            title: title,
+            artist: artist,
+            thumbnail: item.artworkUrl100 || defaultArt,
+            art: item.artworkUrl100
+                ? changeImageSize(item.artworkUrl100, "600x600")
+                : defaultArt,
+            cover: item.artworkUrl100
+                ? changeImageSize(item.artworkUrl100, "1500x1500")
+                : defaultCover
+        }
 
-            const lyric = await fetchLyrics(currentArtist, currentSong);
+        cache[key] = result
 
-            if (lyric) {
-              document.getElementById('lyric').innerHTML = lyric.replace(/\n/g, '<br />');
-              openLyric.style.opacity = "1";
-              openLyric.setAttribute('data-toggle', 'modal');
-            } else {
-              openLyric.style.opacity = "0.3";
-              openLyric.removeAttribute('data-toggle');
-
-              // Esconde o modal caso esteja aberto com a letra da música anterior
-              modalLyric.style.display = "none";
-              modalLyric.setAttribute('aria-hidden', 'true');
-              document.body.classList.remove('modal-open');
-            }
-        };
+        return result
+    } catch (error) {
+        return {
+            title: title,
+            artist: artist,
+            art: defaultArt,
+            cover: defaultCover
+        }
     }
 }
 
+async function fetchStreamingData(url) {
+    try {
+        const response = await fetch(url)
+
+        if (!response.ok) {
+            throw new Error("API error")
+        }
+
+        return await response.json()
+    } catch (error) {
+        console.log("Streaming API error:", error)
+        return null
+    }
+}
 
 async function getStreamingData() {
     try {
-        let data = await fetchStreamingData(API_URL);
+        let data = await fetchStreamingData(API_URL)
+
         if (!data) {
-            data = await fetchStreamingData(FALLBACK_API_URL);
+            data = await fetchStreamingData(FALLBACK_API_URL)
         }
 
-        if (data) {
-            // Payload de carregamento: a API acabou de começar a monitorar
-            // esta rádio. É um ESTADO, não uma música — mostrar o aviso e
-            // NÃO buscar capa/letra de "Carregando...". musicaAtual fica
-            // intacto para o próximo poll com dados reais processar normal.
-            // (O teste da string cobre versões antigas da API sem a flag.)
-            if (data.loading || (!data.artist && /^carregando/i.test(data.songtitle || ""))) {
-                document.getElementById("currentSong").textContent = "Carregando...";
-                document.getElementById("currentArtist").textContent = RADIO_NAME;
-                return;
-            }
+        if (!data) return
 
-            const page = new Page();
-            let currentSong = data.songtitle || (typeof data.song === "object" ? data.song.title : data.song) || "";
-            let currentArtist = (typeof data.artist === "object" ? data.artist.title : data.artist) || "";
+        if (
+            data.loading ||
+            (!data.artist &&
+                /^carregando/i.test(data.songtitle || ""))
+        ) {
+            const song = document.getElementById("currentSong")
+            const artist = document.getElementById("currentArtist")
 
-            // Metadata ICY costuma vir como "Artista - Título" no songtitle.
-            // Sem separar, o nome do artista aparece duplicado na tela e a
-            // busca de capa/letra vai poluída ("Artista - Artista - Título"),
-            // retornando resultados errados no iTunes.
-            if (currentSong.includes(" - ")) {
-                const embeddedArtist = currentSong.split(" - ")[0].trim();
-                const embeddedTitle = currentSong.substring(currentSong.indexOf(" - ") + 3).trim();
+            if (song) song.textContent = "Loading..."
+            if (artist) artist.textContent = RADIO_NAME
 
-                if (!currentArtist) {
-                    currentArtist = embeddedArtist;
-                    currentSong = embeddedTitle;
-                } else if (normalizeText(embeddedArtist) === normalizeText(currentArtist)) {
-                    currentSong = embeddedTitle;
-                }
-            }
-
-            const safeCurrentSong = (currentSong || "").replace(/'/g, "'").replace(/&/g, "&");
-            const safeCurrentArtist = (currentArtist || "").replace(/'/g, "'").replace(/&/g, "&");
-
-            if (safeCurrentSong !== musicaAtual) {
-                document.title = `${safeCurrentSong} - ${safeCurrentArtist} | ${RADIO_NAME}`;
-
-                page.refreshCover(safeCurrentSong, safeCurrentArtist, data.albumArt || data.art || null);
-                page.refreshCurrentSong(safeCurrentSong, safeCurrentArtist);
-                page.refreshLyric(safeCurrentSong, safeCurrentArtist);
-
-                const historicContainer = document.getElementById("historicSong");
-                historicContainer.innerHTML = "";
-
-                const historyArray = data.song_history
-                    ? data.song_history.map((item) => ({ song: item.song.title, artist: item.song.artist, youtubeId: item.song.youtubeId || "" }))
-                    : (data.history || []);
-
-                // A API inclui a música que está tocando agora no topo do
-                // histórico — filtra para não duplicar o now-playing
-                // (tolerante a sufixos tipo "Me Refaz (Ao Vivo)" vs "ME REFAZ")
-                const currentSongNorm = normalizeText(safeCurrentSong);
-                const currentArtistNorm = normalizeText(safeCurrentArtist);
-                const pastSongs = historyArray.filter((item) => {
-                    const itemSong = normalizeText(typeof item.song === "object" ? item.song.title : item.song);
-                    const itemArtist = normalizeText(typeof item.artist === "object" ? item.artist.title : item.artist);
-                    const sameSong = itemSong === currentSongNorm || itemSong.startsWith(currentSongNorm) || currentSongNorm.startsWith(itemSong);
-                    return !(itemArtist === currentArtistNorm && sameSong);
-                });
-
-                // song_history vem do mais recente para o mais antigo:
-                // pega do TOPO (o slice antigo pegava as mais antigas)
-                const maxSongsToDisplay = 4; // Adjust as needed
-                const limitedHistory = pastSongs.slice(0, maxSongsToDisplay);
-
-                for (let i = 0; i < limitedHistory.length; i++) {
-                    const songInfo = limitedHistory[i];
-                    const article = document.createElement("article");
-                    article.classList.add("animated", "slideInRight");
-                    article.innerHTML = `
-                        <div class="cover-historic" style="background-image: url('img/cover.png');"></div>
-                        <div class="music-info">
-                          <div class="song"></div>
-                          <div class="artist"></div>
-                        </div>
-                      `;
-                    article.querySelector(".song").textContent = songInfo.song || "Desconhecido";
-                    article.querySelector(".artist").textContent = songInfo.artist || "Desconhecido";
-
-                    // Música com clipe conhecido: o card vira um atalho para
-                    // assistir o vídeo da música que já tocou
-                    if (songInfo.youtubeId) {
-                        article.classList.add("has-clip");
-                        article.title = "Assistir o clipe de " + (songInfo.song || "");
-                        article.addEventListener("click", function () {
-                            playHistoryClip(songInfo);
-                        });
-                    }
-
-                    historicContainer.appendChild(article);
-                    setTimeout(() => article.classList.remove("animated", "slideInRight"), 2000);
-                    try {
-                        // Passa o elemento (e não o índice): se o histórico for
-                        // reconstruído enquanto a busca da capa está em voo, a
-                        // resposta atrasada não pinta o card errado
-                        page.refreshHistoric(songInfo, article);
-                    } catch (error) {
-                        console.error("Error refreshing historic song:", error);
-                    }
-                }
-                musicaAtual = safeCurrentSong;
-            }
-
-            // Modo clipe — fora do guard de música nova: a API resolve o
-            // youtubeId de forma assíncrona e ele pode chegar num poll
-            // seguinte, com a mesma música
-            handleClipTrack(data, safeCurrentSong, safeCurrentArtist);
+            return
         }
+
+        let song =
+            data.songtitle ||
+            (typeof data.song === "object"
+                ? data.song.title
+                : data.song) ||
+            ""
+
+        let artist =
+            typeof data.artist === "object"
+                ? data.artist.title
+                : data.artist || ""
+
+        if (song.includes(" - ")) {
+            const parts = song.split(" - ")
+            const embeddedArtist = parts.shift().trim()
+            const embeddedTitle = parts.join(" - ").trim()
+
+            if (!artist) {
+                artist = embeddedArtist
+                song = embeddedTitle
+            } else if (
+                normalizeText(embeddedArtist) ===
+                normalizeText(artist)
+            ) {
+                song = embeddedTitle
+            }
+        }
+
+        const songKey =
+            normalizeText(artist) +
+            "|" +
+            normalizeText(song)
+
+        if (songKey !== musicaAtual) {
+            const page = new Page()
+
+            document.title =
+                song +
+                " - " +
+                artist +
+                " | " +
+                RADIO_NAME
+
+            page.refreshCurrentSong(song, artist)
+
+            page.refreshCover(
+                song,
+                artist,
+                data.albumArt || data.art || null
+            )
+
+            updateLyricsButton(song, artist)
+            updateHistory(data, song, artist)
+
+            musicaAtual = songKey
+        }
+
+        handleClipTrack(
+            data,
+            song,
+            artist
+        )
     } catch (error) {
-        console.log("Erro ao buscar dados de streaming:", error);
+        console.log("Now playing error:", error)
     }
 }
 
-// ==================== MODO CLIPE (YouTube) ====================
-// Quando a API entrega o youtubeId da música, o botão de clipe aparece.
-// Ligado: o vídeo assume o lugar da capa, sincronizado com a rádio
-// (start = elapsed). Pausar o vídeo retoma a rádio; dar play pausa.
+function updateLyricsButton(song, artist) {
+    const button = document.querySelector(".lyrics")
 
-let clipTrack = null;
-let lastClipShownId = null;
-let clipWasRadioPlaying = false;
-// Clipe avulso do histórico na tela: segura o acompanhamento automático
-// do modo clipe (sem isso o poll trocava o vídeo de volta a cada 10s)
-let historyClipActive = false;
-const clipPlayingSet = new Set();
+    if (!button) return
 
-function clipModeOn() {
-    return localStorage.getItem('clipMode') === '1';
-}
-
-function handleClipTrack(data, song, artist) {
-    const yt = data.youtubeId || data.youtube_id || '';
-    const np = data.now_playing || {};
-    clipTrack = yt ? { id: yt, song, artist, elapsed: np.elapsed || 0, duration: np.duration || 0, receivedAt: Date.now() } : null;
-
-const btn = document.querySelector('.clip-toggle');
-if (btn && yt) btn.hidden = false; // a API suporta clipes: revela o botão
-
-    // Um clipe do histórico está tocando: não troca o vídeo por baixo do
-    // usuário — quando ele terminar, o watcher volta para a programação
-    if (historyClipActive) return;
-
-    if (!clipModeOn()) return;
-    if (clipTrack) {
-        openClip(clipTrack);
-    } else {
-        closeClip(true); // música sem clipe: volta para a rádio
-    }
-}
-
-function openClip(track) {
-    if (lastClipShownId === track.id) return;
-    lastClipShownId = track.id;
-
-    const coverBox = document.querySelector('.cover-album');
-    if (!coverBox) return;
-
-    // pausa INTENCIONAL da rádio (o watchdog não deve religar por cima)
-    if (!audio.paused) {
-        clipWasRadioPlaying = true;
-        isIntentionalPause = true;
-        if (reconnectTimeout) clearTimeout(reconnectTimeout);
-        fadeOut(function () { audio.pause(); });
+    if (
+        !song ||
+        !artist ||
+        song === "Song Title" ||
+        artist === "Artist Name"
+    ) {
+        button.style.opacity = "0.3"
+        button.disabled = true
+        return
     }
 
-    // Sincroniza com a rádio: começa no ponto em que a música está.
-    // Aproximado: o stream tem atraso de buffer e o clipe pode ser outra
-    // versão da música (ao vivo vs estúdio).
-    let start = 0;
-    if (track.elapsed) {
-        start = Math.floor(track.elapsed + (Date.now() - track.receivedAt) / 1000);
-        if (track.duration && start >= track.duration - 5) start = 0;
-        if (start < 8) start = 0;
-    }
-
-    coverBox.classList.add('is-clip');
-    const oldFrame = coverBox.querySelector('iframe.clip-frame');
-    if (oldFrame) oldFrame.remove();
-
-    const iframe = document.createElement('iframe');
-    iframe.className = 'clip-frame';
-    iframe.src = 'https://www.youtube-nocookie.com/embed/' + track.id + '?autoplay=1&enablejsapi=1' + (start ? '&start=' + start : '');
-    iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture';
-    iframe.allowFullscreen = true;
-    iframe.title = 'Clipe: ' + (track.song || '');
-    // handshake do widget: o player passa a emitir eventos de estado
-    iframe.addEventListener('load', function () {
-        iframe.contentWindow.postMessage(JSON.stringify({ event: 'listening', id: 'clip', channel: 'widget' }), '*');
-    });
-    coverBox.appendChild(iframe);
+    button.style.opacity = "1"
+    button.disabled = false
 }
 
-function closeClip(resumeRadio) {
-    const coverBox = document.querySelector('.cover-album');
-    if (coverBox) {
-        coverBox.classList.remove('is-clip');
-        const iframe = coverBox.querySelector('iframe.clip-frame');
-        if (iframe) iframe.remove();
-    }
-    lastClipShownId = null;
-    historyClipActive = false;
-    clipPlayingSet.clear();
+async function updateHistory(data, currentSong, currentArtist) {
+    const container = document.getElementById("historicSong")
 
-    if (resumeRadio && clipWasRadioPlaying && audio.paused) {
-        isIntentionalPause = false;
-        fadeIn();
-        audio.load();
-        audio.play().catch(function () {});
-    }
-    clipWasRadioPlaying = false;
-}
+    if (!container) return
 
-// Eventos de estado do player do YouTube: pausar o vídeo retoma a rádio,
-// dar play de novo pausa a rádio
-window.addEventListener('message', function (event) {
-    let host = '';
-    try { host = new URL(event.origin).hostname; } catch (e) { return; }
-    if (!/(^|\.)youtube(-nocookie)?\.com$/.test(host)) return;
+    container.innerHTML = ""
 
-    let payload;
-    try { payload = JSON.parse(event.data); } catch (e) { return; }
-    const state = payload && payload.info && typeof payload.info.playerState === 'number' ? payload.info.playerState : null;
-    if (state === null) return;
-
-    const id = payload.id || 'clip';
-    if (state === 1) { // vídeo tocando
-        clipPlayingSet.add(id);
-        if (!audio.paused) {
-            clipWasRadioPlaying = true;
-            isIntentionalPause = true;
-            if (reconnectTimeout) clearTimeout(reconnectTimeout);
-            fadeOut(function () { audio.pause(); });
-        }
-    } else if (state === 2 || state === 0) { // pausado ou terminou
-        clipPlayingSet.delete(id);
-
-        // Clipe do histórico TERMINOU com o modo clipe ligado: volta para
-        // a programação em vídeo (o clipe da música atual), sem retomar a
-        // rádio no meio do caminho
-        if (state === 0 && historyClipActive && clipModeOn() && clipTrack) {
-            historyClipActive = false;
-            openClip(clipTrack);
-            return;
-        }
-        historyClipActive = false;
-
-        if (clipPlayingSet.size === 0 && clipWasRadioPlaying && audio.paused) {
-            isIntentionalPause = false;
-            fadeIn();
-            audio.load();
-            audio.play().catch(function () {});
-        }
-        // Pausa MANUAL do vídeo (estado 2) = o usuário escolheu o áudio:
-        // sai do modo clipe para a troca de música não reabrir o vídeo.
-        // Vídeo que TERMINOU (estado 0) mantém o modo — o próximo clipe
-        // deve abrir, essa é a promessa do modo clipe.
-        if (state === 2) exitClipMode();
-
-        // Clipe avulso (modo clipe desligado, ex.: clique no histórico):
-        // pausado ou terminado, fecha o vídeo e restaura a capa
-        if ((state === 2 || state === 0) && !clipModeOn()) closeClip(false);
-    }
-});
-
-// Botão liga/desliga do modo clipe
-document.addEventListener('DOMContentLoaded', function () {
-    const btn = document.querySelector('.clip-toggle');
-    if (!btn) return;
-    btn.classList.toggle('is-active', clipModeOn());
-    btn.addEventListener('click', function () {
-        const turningOn = !clipModeOn();
-        localStorage.setItem('clipMode', turningOn ? '1' : '0');
-        btn.classList.toggle('is-active', turningOn);
-        if (turningOn && clipTrack) {
-            openClip(clipTrack);
-        } else if (!turningOn) {
-            closeClip(true);
-        }
-    });
-});
-
-
-// Comparação tolerante a acentos/caixa ("GLÓRIA" ≈ "Gloria")
-function normalizeText(text) {
-    return (text || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").trim();
-}
-
-// Função para buscar dados de streaming de uma API específica
-async function fetchStreamingData(apiUrl) {
-  try {
-    const response = await fetch(apiUrl);
-    if (!response.ok) {
-      throw new Error(`Erro na requisição da API: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    return data;
-  } catch (error) {
-    console.log("Erro ao buscar dados de streaming da API:", error);
-    return null; // Retorna null em caso de erro
-  }
-}
-
-// Função para alterar o tamanho da imagem do iTunes
-function changeImageSize(url, size) {
-  const parts = url.split("/");
-  const filename = parts.pop();
-  const newFilename = `${size}${filename.substring(filename.lastIndexOf("."))}`;
-  return parts.join("/") + "/" + newFilename;
-}
-
-// Busca na API própria (search.php) — é a mesma fonte de capas do albumArt
-// do now-playing, então o resultado é consistente com a capa principal.
-// Retorna null quando não encontra (o chamador cai para o iTunes).
-const getDataFromSearch = async (artist, title, defaultArt, defaultCover) => {
-  const text = artist === title ? `${title}` : `${artist} - ${title}`;
-  const cacheKey = ('search:' + text).toLowerCase();
-  if (cache[cacheKey]) {
-      return cache[cacheKey];
-  }
-
-  try {
-      const response = await fetch(`https://api.twj.es/search.php?query=${encodeURIComponent(text)}`);
-      if (!response.ok) return null;
-      const data = await response.json();
-
-      if (data.results && data.results.artwork) {
-          const results = {
-              title,
-              artist,
-              thumbnail: data.results.artwork,
-              art: data.results.artwork,
-              cover: data.results.artwork,
-              stream_url: data.results.stream_url || "#not-found",
-          };
-          cache[cacheKey] = results;
-          return results;
-      }
-      return null;
-  } catch (error) {
-      return null;
-  }
-};
-
-// Capa de uma música: tenta a API própria primeiro, iTunes como fallback
-const getCoverData = async (artist, title, defaultArt, defaultCover) => {
-  const fromSearch = await getDataFromSearch(artist, title, defaultArt, defaultCover);
-  if (fromSearch) return fromSearch;
-  return getDataFromITunes(artist, title, defaultArt, defaultCover);
-};
-
-// Função para buscar dados da API do iTunes
-const getDataFromITunes = async (artist, title, defaultArt, defaultCover) => {
-  let text;
-  if (artist === title) {
-      text = `${title}`;
-  } else {
-      // Sem o " - " literal: a busca do iTunes é por palavras-chave e o
-      // hífen solto só atrapalha o match
-      text = `${artist} ${title}`;
-  }
-  const cacheKey = text.toLowerCase();
-  if (cache[cacheKey]) {
-      return cache[cacheKey];
-  }
-
-  // media=music/entity=song: sem esse filtro, podcasts com nomes parecidos
-  // entravam no match e a capa vinha errada
-  const response = await fetch(`https://itunes.apple.com/search?limit=1&media=music&entity=song&term=${encodeURIComponent(text)}`);
-  if (response.status === 403) {
-      const results = {
-          title,
-          artist,
-          art: defaultArt,
-          cover: defaultCover,
-          stream_url: "#not-found",
-      };
-      return results;
-  }
-  const data = response.ok ? await response.json() : {};
-  if (!data.results || data.results.length === 0) {
-      const results = {
-          title,
-          artist,
-          art: defaultArt,
-          cover: defaultCover,
-          stream_url: "#not-found",
-      };
-      return results;
-  }
-  const itunes = data.results[0];
-  const results = {
-      title: title, // Mantive o título original da transmissão
-      artist: artist, // Mantive o artista original da transmissão
-      thumbnail: itunes.artworkUrl100 || defaultArt,
-      art: itunes.artworkUrl100 ? changeImageSize(itunes.artworkUrl100, "600x600") : defaultArt,
-      cover: itunes.artworkUrl100 ? changeImageSize(itunes.artworkUrl100, "1500x1500") : defaultCover,
-      stream_url: "#not-found",
-  };
-  cache[cacheKey] = results;
-  return results;
-};
-
-// AUDIO 
-
-
-// Variável global para armazenar as músicas
-var audio = new Audio(URL_STREAMING);
-
-// Player control
-class Player {
-    constructor() {
-        this.play = function () {
-            var playPromise = audio.play();
-            if (playPromise !== undefined) {
-                // Autoplay bloqueado pelo navegador até a primeira interação:
-                // não é um erro, o usuário dá o play manualmente.
-                playPromise.catch(function () {});
-            }
-
-            var defaultVolume = document.getElementById('volume').value;
-
-            if (typeof (Storage) !== 'undefined') {
-                if (localStorage.getItem('volume') !== null) {
-                    audio.volume = intToDecimal(localStorage.getItem('volume'));
-                } else {
-                    audio.volume = intToDecimal(defaultVolume);
+    const history =
+        data.song_history
+            ? data.song_history.map(function (item) {
+                return {
+                    song: item.song.title,
+                    artist: item.song.artist,
+                    youtubeId: item.song.youtubeId || ""
                 }
-            } else {
-                audio.volume = intToDecimal(defaultVolume);
-            }
-            document.getElementById('volIndicator').innerHTML = defaultVolume;
-        };
+            })
+            : data.history || []
 
-        this.pause = function () {
-            audio.pause();
-        };
-    }
-}
+    const currentSongNorm = normalizeText(currentSong)
+    const currentArtistNorm = normalizeText(currentArtist)
 
-function setPlayerIcon(iconClass, label) {
-    var botao = document.getElementById('playerButton');
-    var bplay = document.getElementById('buttonPlay');
-    botao.className = iconClass;
-    bplay.firstChild.data = label;
-}
+    const pastSongs = history.filter(function (item) {
+        const song =
+            typeof item.song === "object"
+                ? item.song.title
+                : item.song
 
-// On play, change the button to pause
-audio.onplay = function () {
-    setPlayerIcon('fa fa-pause', 'PAUSAR');
-}
+        const artist =
+            typeof item.artist === "object"
+                ? item.artist.title
+                : item.artist
 
-// On pause, change the button to play (a menos que estejamos exibindo o
-// spinner de reconexão, que também pausa o áudio momentaneamente)
-audio.onpause = function () {
-    if (!isIntentionalPause && reconnectAttempts > 0) return;
-    setPlayerIcon('fa fa-play', 'PLAY');
-}
+        return !(
+            normalizeText(artist) === currentArtistNorm &&
+            (
+                normalizeText(song) === currentSongNorm ||
+                normalizeText(song).startsWith(currentSongNorm) ||
+                currentSongNorm.startsWith(normalizeText(song))
+            )
+        )
+    })
 
-// Enquanto o áudio estiver em buffer, mostra o spinner girando
-audio.addEventListener('waiting', function () {
-    if (!audio.paused) setPlayerIcon('fa fa-spinner fa-spin', 'CARREGANDO');
-});
+    const songs = pastSongs.slice(0, 4)
 
-// Áudio voltou a fluir de verdade: reseta as tentativas de reconexão e
-// habilita o watchdog (a partir daqui uma queda deve reconectar sozinha)
-audio.addEventListener('playing', function () {
-    isIntentionalPause = false;
-    reconnectAttempts = 0;
-    if (reconnectTimeout) clearTimeout(reconnectTimeout);
-    setPlayerIcon('fa fa-pause', 'PAUSAR');
-});
+    for (const item of songs) {
+        const article = document.createElement("article")
 
-// Unmute when volume changed
-audio.onvolumechange = function () {
-    if (audio.volume > 0) {
-        audio.muted = false;
-    }
-}
+        article.classList.add(
+            "animated",
+            "slideInRight"
+        )
 
-// Reconexão automática (rede instável) antes de incomodar o usuário com o
-// confirm() de "Stream Down" — só aparece se 5 tentativas seguidas falharem.
-// Começa true: antes da primeira reprodução real não há o que reconectar
-// (ex.: stream fora do ar no carregamento não deve gerar loop nem confirm).
-let isIntentionalPause = true;
-let reconnectAttempts = 0;
-let reconnectTimeout = null;
+        article.innerHTML = `
+            <div class="cover-historic"></div>
+            <div class="music-info">
+                <div class="song"></div>
+                <div class="artist"></div>
+            </div>
+        `
 
-function handleConnectionDrop() {
-    if (isIntentionalPause) return;
+        article.querySelector(".song").textContent =
+            item.song || "Unknown"
 
-    if (reconnectTimeout) clearTimeout(reconnectTimeout);
+        article.querySelector(".artist").textContent =
+            item.artist || "Unknown"
 
-    if (reconnectAttempts < 5) {
-        reconnectAttempts++;
-        setPlayerIcon('fa fa-spinner fa-spin', 'RECONECTANDO');
-        var delay = reconnectAttempts * 2000;
+        if (item.youtubeId) {
+            article.classList.add("has-clip")
 
-        reconnectTimeout = setTimeout(function () {
-            audio.load();
-            var playPromise = audio.play();
-            if (playPromise !== undefined) {
-                playPromise.catch(function (e) { console.error('Falha ao reconectar:', e); });
-            }
-        }, delay);
-    } else {
-        reconnectAttempts = 0;
-        setPlayerIcon('fa fa-play', 'PLAY');
-
-        var confirmacao = confirm('Stream Down / Network Error. \nClick OK to try again.');
-        if (confirmacao) {
-            window.location.reload();
+            article.addEventListener("click", function () {
+                playHistoryClip(item)
+            })
         }
+
+        container.appendChild(article)
+
+        const page = new Page()
+
+        page.refreshHistoric(item, article)
+
+        setTimeout(function () {
+            article.classList.remove(
+                "animated",
+                "slideInRight"
+            )
+        }, 2000)
     }
 }
 
-audio.onerror = handleConnectionDrop;
-audio.addEventListener('stalled', handleConnectionDrop);
+function openLyrics() {
+    const modal = document.getElementById("modalLyrics")
+    const lyricBox = document.getElementById("lyric")
 
-// Fade suave no volume ao dar play/pause, para evitar o "estalo" de áudio
-let fadeInterval = null;
+    const songElement = document.getElementById("currentSong")
+    const artistElement = document.getElementById("currentArtist")
+
+    if (!modal || !lyricBox || !songElement || !artistElement) {
+        return
+    }
+
+    const song = songElement.textContent.trim()
+    const artist = artistElement.textContent.trim()
+
+    if (!song || !artist) return
+
+    modal.style.display = "flex"
+    modal.setAttribute("aria-hidden", "false")
+
+    document.body.classList.add("modal-open")
+
+    lyricBox.textContent = "Loading lyrics..."
+
+    fetchLyrics(artist, song).then(function (lyrics) {
+        if (lyrics) {
+            lyricBox.innerHTML = lyrics.replace(
+                /\n/g,
+                "<br>"
+            )
+        } else {
+            lyricBox.textContent =
+                "Lyrics could not be found for this song."
+        }
+    })
+}
+
+function closeLyrics() {
+    const modal = document.getElementById("modalLyrics")
+
+    if (!modal) return
+
+    modal.style.display = "none"
+    modal.setAttribute("aria-hidden", "true")
+
+    document.body.classList.remove("modal-open")
+}
+
+function setupControls() {
+    const volumeButton =
+        document.querySelector(".volume-toggle")
+
+    const volumePopover =
+        document.querySelector(".volume-popover")
+
+    const volumeSlider =
+        document.getElementById("volume")
+
+    const lyricsButton =
+        document.querySelector(".lyrics")
+
+    const closeButton =
+        document.querySelector(".modal-close")
+
+    const modal =
+        document.getElementById("modalLyrics")
+
+    if (volumeButton && volumePopover) {
+        volumeButton.addEventListener("click", function (event) {
+            event.stopPropagation()
+
+            volumePopover.hidden =
+                !volumePopover.hidden
+        })
+    }
+
+    if (volumeSlider) {
+        volumeSlider.addEventListener("input", function () {
+            const value = Number(this.value)
+
+            audio.volume = value / 100
+
+            const indicator =
+                document.getElementById("volIndicator")
+
+            if (indicator) {
+                indicator.textContent = value
+            }
+
+            localStorage.setItem(
+                "volume",
+                value
+            )
+
+            updateVolumeIcon(value)
+        })
+    }
+
+    if (lyricsButton) {
+        lyricsButton.addEventListener(
+            "click",
+            openLyrics
+        )
+    }
+
+    if (closeButton) {
+        closeButton.addEventListener(
+            "click",
+            closeLyrics
+        )
+    }
+
+    if (modal) {
+        modal.addEventListener(
+            "click",
+            function (event) {
+                if (event.target === modal) {
+                    closeLyrics()
+                }
+            }
+        )
+    }
+
+    document.addEventListener(
+        "click",
+        function (event) {
+            if (
+                volumePopover &&
+                volumeButton &&
+                !volumePopover.contains(event.target) &&
+                !volumeButton.contains(event.target)
+            ) {
+                volumePopover.hidden = true
+            }
+        }
+    )
+}
+
+function updateVolumeIcon(value) {
+    const button =
+        document.querySelector(".volume-toggle")
+
+    if (!button) return
+
+    const icon = button.querySelector("i")
+
+    if (!icon) return
+
+    if (value === 0) {
+        icon.className = "fa fa-volume-off"
+    } else if (value < 50) {
+        icon.className = "fa fa-volume-down"
+    } else {
+        icon.className = "fa fa-volume-up"
+    }
+}
+
+function setPlayerIcon(icon, label) {
+    const button =
+        document.getElementById("playerButton")
+
+    const labelElement =
+        document.getElementById("buttonPlay")
+
+    if (button) {
+        button.className = icon
+    }
+
+    if (labelElement) {
+        labelElement.textContent = label
+    }
+}
 
 function fadeOut(callback) {
-    if (fadeInterval) clearInterval(fadeInterval);
-    var currentVol = audio.volume;
-    var step = currentVol / 15;
+    if (fadeInterval) {
+        clearInterval(fadeInterval)
+    }
+
+    const current = audio.volume
+    const step = current / 15
+
+    if (step <= 0) {
+        callback()
+        return
+    }
 
     fadeInterval = setInterval(function () {
-        currentVol -= step;
-        if (currentVol <= 0.05) {
-            audio.volume = 0;
-            clearInterval(fadeInterval);
-            fadeInterval = null;
-            if (callback) callback();
-        } else {
-            audio.volume = currentVol;
+        audio.volume -= step
+
+        if (audio.volume <= 0.01) {
+            audio.volume = 0
+
+            clearInterval(fadeInterval)
+            fadeInterval = null
+
+            if (callback) {
+                callback()
+            }
         }
-    }, 30);
+    }, 30)
 }
 
 function fadeIn() {
-    if (fadeInterval) clearInterval(fadeInterval);
-    var targetVol = intToDecimal(localStorage.getItem('volume') || document.getElementById('volume').value || 80);
-    audio.volume = 0;
-    var step = targetVol / 15;
+    if (fadeInterval) {
+        clearInterval(fadeInterval)
+    }
+
+    const saved =
+        Number(
+            localStorage.getItem("volume") ||
+            document.getElementById("volume")?.value ||
+            80
+        ) / 100
+
+    audio.volume = 0
+
+    const step = saved / 15
+
+    if (step <= 0) {
+        audio.volume = saved
+        return
+    }
 
     fadeInterval = setInterval(function () {
-        var newVol = audio.volume + step;
-        if (newVol >= targetVol) {
-            audio.volume = targetVol;
-            clearInterval(fadeInterval);
-            fadeInterval = null;
-        } else {
-            audio.volume = newVol;
+        audio.volume += step
+
+        if (audio.volume >= saved) {
+            audio.volume = saved
+
+            clearInterval(fadeInterval)
+            fadeInterval = null
         }
-    }, 30);
-}
-
-document.getElementById('volume').oninput = function () {
-    audio.volume = intToDecimal(this.value);
-
-    var page = new Page();
-    page.changeVolumeIndicator(this.value);
-}
-
-
-// A rádio e um vídeo do YouTube nunca tocam juntos: dar play na rádio
-// pausa qualquer embed em reprodução (o caminho inverso — dar play no
-// vídeo pausa a rádio — é tratado pelo watcher de mensagens do YouTube)
-function pauseYouTubeEmbeds() {
-    document.querySelectorAll('iframe[src*="youtube"]').forEach(function (frame) {
-        try {
-            frame.contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'pauseVideo', args: [] }), '*');
-        } catch (e) {}
-    });
+    }, 30)
 }
 
 function togglePlay() {
     if (!audio.paused) {
-        isIntentionalPause = true;
-        if (reconnectTimeout) clearTimeout(reconnectTimeout);
+        isIntentionalPause = true
+
+        if (reconnectTimeout) {
+            clearTimeout(reconnectTimeout)
+        }
+
         fadeOut(function () {
-            audio.pause();
-        });
+            audio.pause()
+        })
+
+        return
+    }
+
+    pauseYouTubeEmbeds()
+
+    exitClipMode()
+
+    isIntentionalPause = false
+
+    fadeIn()
+
+    audio.load()
+
+    audio.play().catch(function () {
+        setPlayerIcon(
+            "fa fa-play",
+            "PLAY"
+        )
+    })
+}
+
+function pauseYouTubeEmbeds() {
+    document
+        .querySelectorAll('iframe[src*="youtube"]')
+        .forEach(function (frame) {
+            try {
+                frame.contentWindow.postMessage(
+                    JSON.stringify({
+                        event: "command",
+                        func: "pauseVideo",
+                        args: []
+                    }),
+                    "*"
+                )
+            } catch (error) {}
+        })
+}
+
+function volumeUp() {
+    const value = Math.min(
+        1,
+        audio.volume + 0.01
+    )
+
+    audio.volume = value
+
+    const number = decimalToInt(value)
+
+    const slider =
+        document.getElementById("volume")
+
+    if (slider) {
+        slider.value = number
+    }
+
+    new Page().changeVolumeIndicator(number)
+
+    updateVolumeIcon(number)
+}
+
+function volumeDown() {
+    const value = Math.max(
+        0,
+        audio.volume - 0.01
+    )
+
+    audio.volume = value
+
+    const number = decimalToInt(value)
+
+    const slider =
+        document.getElementById("volume")
+
+    if (slider) {
+        slider.value = number
+    }
+
+    new Page().changeVolumeIndicator(number)
+
+    updateVolumeIcon(number)
+}
+
+function mute() {
+    if (!audio.muted && audio.volume > 0) {
+        localStorage.setItem(
+            "volume",
+            decimalToInt(audio.volume)
+        )
+
+        audio.volume = 0
+        audio.muted = true
+
+        const slider =
+            document.getElementById("volume")
+
+        if (slider) {
+            slider.value = 0
+        }
+
+        new Page().changeVolumeIndicator(0)
+
+        updateVolumeIcon(0)
     } else {
-        pauseYouTubeEmbeds();
-        // Voltar para a rádio desliga o modo clipe — sem isso, a próxima
-        // troca de música reabria o vídeo por cima do áudio
-        exitClipMode();
-        isIntentionalPause = false;
-        fadeIn();
-        audio.load();
-        audio.play();
+        const volume =
+            Number(
+                localStorage.getItem("volume") || 80
+            )
+
+        audio.muted = false
+        audio.volume = volume / 100
+
+        const slider =
+            document.getElementById("volume")
+
+        if (slider) {
+            slider.value = volume
+        }
+
+        new Page().changeVolumeIndicator(volume)
+
+        updateVolumeIcon(volume)
     }
 }
 
-// Reprodução avulsa de um clipe do histórico (não liga o modo clipe:
-// é "assistir esta música", não "seguir a programação em vídeo")
+audio.addEventListener("play", function () {
+    setPlayerIcon(
+        "fa fa-pause",
+        "PAUSE"
+    )
+})
+
+audio.addEventListener("pause", function () {
+    if (!isIntentionalPause) return
+
+    setPlayerIcon(
+        "fa fa-play",
+        "PLAY"
+    )
+})
+
+audio.addEventListener("waiting", function () {
+    if (!audio.paused) {
+        setPlayerIcon(
+            "fa fa-spinner fa-spin",
+            "LOADING"
+        )
+    }
+})
+
+audio.addEventListener("playing", function () {
+    isIntentionalPause = false
+    reconnectAttempts = 0
+
+    if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout)
+        reconnectTimeout = null
+    }
+
+    setPlayerIcon(
+        "fa fa-pause",
+        "PAUSE"
+    )
+})
+
+audio.addEventListener("stalled", handleConnectionDrop)
+audio.addEventListener("error", handleConnectionDrop)
+
+function handleConnectionDrop() {
+    if (isIntentionalPause) return
+
+    if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout)
+    }
+
+    if (reconnectAttempts < 5) {
+        reconnectAttempts++
+
+        setPlayerIcon(
+            "fa fa-spinner fa-spin",
+            "RECONNECTING"
+        )
+
+        reconnectTimeout = setTimeout(function () {
+            audio.load()
+
+            audio.play().catch(function () {})
+        }, reconnectAttempts * 2000)
+    } else {
+        reconnectAttempts = 0
+
+        setPlayerIcon(
+            "fa fa-play",
+            "PLAY"
+        )
+    }
+}
+
+function clipModeOn() {
+    return localStorage.getItem("clipMode") === "1"
+}
+
+function handleClipTrack(data, song, artist) {
+    const youtubeId =
+        data.youtubeId ||
+        data.youtube_id ||
+        ""
+
+    const nowPlaying =
+        data.now_playing || {}
+
+    clipTrack = youtubeId
+        ? {
+            id: youtubeId,
+            song: song,
+            artist: artist,
+            elapsed: nowPlaying.elapsed || 0,
+            duration: nowPlaying.duration || 0,
+            receivedAt: Date.now()
+        }
+        : null
+
+    const button =
+        document.querySelector(".clip-toggle")
+
+    if (button) {
+        button.hidden = !youtubeId
+    }
+
+    if (historyClipActive) return
+
+    if (!clipModeOn()) return
+
+    if (clipTrack) {
+        openClip(clipTrack)
+    } else {
+        closeClip(true)
+    }
+}
+
+function openClip(track) {
+    if (lastClipShownId === track.id) return
+
+    lastClipShownId = track.id
+
+    const cover =
+        document.querySelector(".cover-album")
+
+    if (!cover) return
+
+    if (!audio.paused) {
+        clipWasRadioPlaying = true
+        isIntentionalPause = true
+
+        fadeOut(function () {
+            audio.pause()
+        })
+    }
+
+    let start = 0
+
+    if (track.elapsed) {
+        start = Math.floor(
+            track.elapsed +
+            (Date.now() - track.receivedAt) / 1000
+        )
+
+        if (
+            track.duration &&
+            start >= track.duration - 5
+        ) {
+            start = 0
+        }
+
+        if (start < 8) {
+            start = 0
+        }
+    }
+
+    cover.classList.add("is-clip")
+
+    const oldFrame =
+        cover.querySelector(".clip-frame")
+
+    if (oldFrame) {
+        oldFrame.remove()
+    }
+
+    const iframe =
+        document.createElement("iframe")
+
+    iframe.className = "clip-frame"
+
+    iframe.src =
+        "https://www.youtube-nocookie.com/embed/" +
+        track.id +
+        "?autoplay=1&enablejsapi=1" +
+        (start ? "&start=" + start : "")
+
+    iframe.allow =
+        "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+
+    iframe.allowFullscreen = true
+
+    iframe.title =
+        "Music video: " +
+        (track.song || "")
+
+    iframe.addEventListener(
+        "load",
+        function () {
+            iframe.contentWindow.postMessage(
+                JSON.stringify({
+                    event: "listening",
+                    id: "clip",
+                    channel: "widget"
+                }),
+                "*"
+            )
+        }
+    )
+
+    cover.appendChild(iframe)
+}
+
+function closeClip(resumeRadio) {
+    const cover =
+        document.querySelector(".cover-album")
+
+    if (cover) {
+        cover.classList.remove("is-clip")
+
+        const iframe =
+            cover.querySelector(".clip-frame")
+
+        if (iframe) {
+            iframe.remove()
+        }
+    }
+
+    lastClipShownId = null
+    historyClipActive = false
+    clipPlayingSet.clear()
+
+    if (
+        resumeRadio &&
+        clipWasRadioPlaying &&
+        audio.paused
+    ) {
+        isIntentionalPause = false
+
+        audio.load()
+
+        audio.play().catch(function () {})
+    }
+
+    clipWasRadioPlaying = false
+}
+
+function exitClipMode() {
+    if (!clipModeOn()) return
+
+    localStorage.setItem(
+        "clipMode",
+        "0"
+    )
+
+    const button =
+        document.querySelector(".clip-toggle")
+
+    if (button) {
+        button.classList.remove("is-active")
+    }
+
+    closeClip(false)
+}
+
 function playHistoryClip(songInfo) {
-    historyClipActive = true;
+    historyClipActive = true
+
     openClip({
         id: songInfo.youtubeId,
         song: songInfo.song,
         artist: songInfo.artist,
         elapsed: 0,
         duration: 0,
-        receivedAt: Date.now(),
-    });
-    // traz o player para a vista (o histórico fica abaixo da dobra)
-    const coverBox = document.querySelector('.cover-album');
-    if (coverBox) coverBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        receivedAt: Date.now()
+    })
+
+    const cover =
+        document.querySelector(".cover-album")
+
+    if (cover) {
+        cover.scrollIntoView({
+            behavior: "smooth",
+            block: "center"
+        })
+    }
 }
 
-// Sai do modo clipe (persistindo a escolha e restaurando a capa)
-function exitClipMode() {
-    if (!clipModeOn()) return;
-    localStorage.setItem('clipMode', '0');
-    const btn = document.querySelector('.clip-toggle');
-    if (btn) btn.classList.remove('is-active');
-    closeClip(false);
-}
+window.addEventListener(
+    "message",
+    function (event) {
+        let host = ""
 
-function volumeUp() {
-    var vol = audio.volume;
-    if(audio) {
-        if(audio.volume >= 0 && audio.volume < 1) {
-            audio.volume = (vol + .01).toFixed(2);
+        try {
+            host = new URL(
+                event.origin
+            ).hostname
+        } catch (error) {
+            return
+        }
+
+        if (
+            !/(^|\.)youtube(-nocookie)?\.com$/.test(host)
+        ) {
+            return
+        }
+
+        let data
+
+        try {
+            data = JSON.parse(event.data)
+        } catch (error) {
+            return
+        }
+
+        const state =
+            data &&
+            data.info &&
+            typeof data.info.playerState === "number"
+                ? data.info.playerState
+                : null
+
+        if (state === null) return
+
+        const id =
+            data.id || "clip"
+
+        if (state === 1) {
+            clipPlayingSet.add(id)
+
+            if (!audio.paused) {
+                clipWasRadioPlaying = true
+                isIntentionalPause = true
+
+                audio.pause()
+            }
+        }
+
+        if (state === 2 || state === 0) {
+            clipPlayingSet.delete(id)
+
+            if (
+                state === 0 &&
+                historyClipActive &&
+                clipModeOn() &&
+                clipTrack
+            ) {
+                historyClipActive = false
+                openClip(clipTrack)
+                return
+            }
+
+            historyClipActive = false
+
+            if (
+                clipPlayingSet.size === 0 &&
+                clipWasRadioPlaying &&
+                audio.paused
+            ) {
+                isIntentionalPause = false
+
+                audio.load()
+
+                audio.play().catch(function () {})
+            }
+
+            if (state === 2) {
+                exitClipMode()
+            }
+
+            if (
+                (state === 2 || state === 0) &&
+                !clipModeOn()
+            ) {
+                closeClip(false)
+            }
         }
     }
+)
+
+function setupClipButton() {
+    const button =
+        document.querySelector(".clip-toggle")
+
+    if (!button) return
+
+    button.classList.toggle(
+        "is-active",
+        clipModeOn()
+    )
+
+    button.addEventListener(
+        "click",
+        function () {
+            const enabled =
+                !clipModeOn()
+
+            localStorage.setItem(
+                "clipMode",
+                enabled ? "1" : "0"
+            )
+
+            button.classList.toggle(
+                "is-active",
+                enabled
+            )
+
+            if (enabled && clipTrack) {
+                openClip(clipTrack)
+            } else if (!enabled) {
+                closeClip(true)
+            }
+        }
+    )
 }
 
-function volumeDown() {
-    var vol = audio.volume;
-    if(audio) {
-        if(audio.volume >= 0.01 && audio.volume <= 1) {
-            audio.volume = (vol - .01).toFixed(2);
+document.addEventListener(
+    "keydown",
+    function (event) {
+        const slider =
+            document.getElementById("volume")
+
+        switch (event.key) {
+            case "ArrowUp":
+                volumeUp()
+                break
+
+            case "ArrowDown":
+                volumeDown()
+                break
+
+            case " ":
+            case "Spacebar":
+                event.preventDefault()
+                togglePlay()
+                break
+
+            case "p":
+            case "P":
+                togglePlay()
+                break
+
+            case "m":
+            case "M":
+                mute()
+                break
+
+            default:
+                if (
+                    /^[0-9]$/.test(event.key)
+                ) {
+                    const value =
+                        Number(event.key) * 10
+
+                    audio.volume =
+                        value / 100
+
+                    if (slider) {
+                        slider.value = value
+                    }
+
+                    new Page()
+                        .changeVolumeIndicator(value)
+
+                    updateVolumeIcon(value)
+                }
         }
     }
-}
+)
 
-function mute() {
-    if (!audio.muted) {
-        document.getElementById('volIndicator').innerHTML = 0;
-        document.getElementById('volume').value = 0;
-        audio.volume = 0;
-        audio.muted = true;
-    } else {
-        var localVolume = localStorage.getItem('volume');
-        document.getElementById('volIndicator').innerHTML = localVolume;
-        document.getElementById('volume').value = localVolume;
-        audio.volume = intToDecimal(localVolume);
-        audio.muted = false;
+let deferredInstallPrompt = null
+
+window.addEventListener(
+    "beforeinstallprompt",
+    function (event) {
+        event.preventDefault()
+
+        deferredInstallPrompt = event
+
+        const button =
+            document.getElementById(
+                "installPwaBtn"
+            )
+
+        if (button) {
+            button.hidden = false
+        }
     }
-}
+)
 
-document.addEventListener('keydown', function (event) {
-    var key = event.key;
-    var slideVolume = document.getElementById('volume');
-    var page = new Page();
+window.addEventListener(
+    "appinstalled",
+    function () {
+        const button =
+            document.getElementById(
+                "installPwaBtn"
+            )
 
-    switch (key) {
-        // Arrow up
-        case 'ArrowUp':
-            volumeUp();
-            slideVolume.value = decimalToInt(audio.volume);
-            page.changeVolumeIndicator(decimalToInt(audio.volume));
-            break;
-        // Arrow down
-        case 'ArrowDown':
-            volumeDown();
-            slideVolume.value = decimalToInt(audio.volume);
-            page.changeVolumeIndicator(decimalToInt(audio.volume));
-            break;
-        // Spacebar (preventDefault evita rolar a página junto)
-        case ' ':
-        case 'Spacebar':
-            event.preventDefault();
-            togglePlay();
-            break;
-        // P
-        case 'p':
-        case 'P':
-            togglePlay();
-            break;
-        // M
-        case 'm':
-        case 'M':
-            mute();
-            break;
-        // Numeric keys 0-9
-        case '0':
-        case '1':
-        case '2':
-        case '3':
-        case '4':
-        case '5':
-        case '6':
-        case '7':
-        case '8':
-        case '9':
-            var volumeValue = parseInt(key);
-            audio.volume = volumeValue / 10;
-            slideVolume.value = volumeValue * 10;
-            page.changeVolumeIndicator(volumeValue * 10);
-            break;
+        if (button) {
+            button.hidden = true
+        }
+
+        deferredInstallPrompt = null
     }
-}); 
+)
 
-function intToDecimal(vol) {
-    return vol / 100;
+function setupInstallButton() {
+    const button =
+        document.getElementById(
+            "installPwaBtn"
+        )
+
+    if (!button) return
+
+    button.addEventListener(
+        "click",
+        async function () {
+            if (!deferredInstallPrompt) return
+
+            deferredInstallPrompt.prompt()
+
+            await deferredInstallPrompt.userChoice
+
+            deferredInstallPrompt = null
+            button.hidden = true
+        }
+    )
 }
 
-function decimalToInt(vol) {
-    return vol * 100;
-}
+window.addEventListener(
+    "load",
+    function () {
+        const page = new Page()
 
-// Botão de instalar como PWA: só aparece quando o navegador sinaliza que a
-// instalação está disponível (manifest + service worker já registrados).
-let deferredInstallPrompt = null;
+        page.changeTitlePage()
+        page.setVolume()
 
-window.addEventListener('beforeinstallprompt', function (event) {
-    event.preventDefault();
-    deferredInstallPrompt = event;
-    var installBtn = document.getElementById('installPwaBtn');
-    if (installBtn) installBtn.hidden = false;
-});
+        const radioName =
+            document.getElementById("radioName")
 
-document.addEventListener('DOMContentLoaded', function () {
-    var installBtn = document.getElementById('installPwaBtn');
-    if (!installBtn) return;
+        if (radioName) {
+            radioName.textContent =
+                RADIO_NAME
+        }
 
-    installBtn.addEventListener('click', function () {
-        if (!deferredInstallPrompt) return;
-        deferredInstallPrompt.prompt();
-        deferredInstallPrompt.userChoice.then(function () {
-            deferredInstallPrompt = null;
-            installBtn.hidden = true;
-        });
-    });
+        setupControls()
+        setupClipButton()
+        setupInstallButton()
 
-    window.addEventListener('appinstalled', function () {
-        installBtn.hidden = true;
-    });
-});
+        getStreamingData()
+
+        setInterval(
+            getStreamingData,
+            10000
+        )
+
+        audio.load()
+    }
+)
