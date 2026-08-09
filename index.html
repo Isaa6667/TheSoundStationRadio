@@ -64,28 +64,38 @@
                 <div class="controls">
                     <div class="control-cluster">
 
-                        <div class="volume-wrap volume-control">
-                            <button type="button" class="ctrl-btn volume-toggle" aria-label="Volume" title="Volume">
-                                <i class="fa fa-volume-up"></i>
-                            </button>
-                            <div class="volume-popover" hidden>
-                                <input type="range" id="volume" step="1" min="0" max="100" value="80" aria-label="Volume">
-                                <span class="vol-value"><span id="volIndicator">80</span>%</span>
-                            </div>
-                        </div>
+                       <div class="control-cluster">
 
-                        <button type="button" class="play-btn" onclick="togglePlay()" aria-label="Play or pause">
-                            <i id="playerButton" class="fa fa-play"></i>
-                        </button>
+    <div class="volume-wrap volume-control">
+        <button type="button" class="ctrl-btn volume-toggle" aria-label="Volume" title="Volume">
+            <i class="fa fa-volume-up"></i>
+        </button>
 
-                        <button type="button" class="ctrl-btn lyrics" title="Song Lyrics" aria-label="Song Lyrics">
-                            <i class="fa fa-music"></i>
-                        </button>
-                        
-                        <button type="button" class="ctrl-btn clip-toggle" title="Music Video" aria-label="Music Video" hidden>
-                             <i class="fa fa-youtube-play"></i>
-                        </button>
-                    </div>
+        <div class="volume-popover" hidden>
+            <input type="range" id="volume" step="1" min="0" max="100" value="80" aria-label="Volume">
+            <span class="vol-value">
+                <span id="volIndicator">80</span>%
+            </span>
+        </div>
+    </div>
+
+    <button type="button" class="play-btn" onclick="togglePlay()" aria-label="Play or pause">
+        <i id="playerButton" class="fa fa-play"></i>
+    </button>
+
+    <button type="button" class="ctrl-btn lyrics" title="Song Lyrics" aria-label="Song Lyrics">
+        <i class="fa fa-music"></i>
+    </button>
+
+    <button type="button" class="ctrl-btn popout-btn" title="Pop Out Player" aria-label="Pop Out Player">
+        <i class="fa fa-external-link"></i>
+    </button>
+
+    <button type="button" class="ctrl-btn clip-toggle" title="Music Video" aria-label="Music Video" hidden>
+        <i class="fa fa-youtube-play"></i>
+    </button>
+
+</div>
 
                     <span id="buttonPlay" class="sr-only" aria-live="polite">PLAY</span>
                 </div>
