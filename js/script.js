@@ -1553,6 +1553,28 @@ function setupInstallButton() {
     )
 }
 
+document.querySelector(".popout-btn").addEventListener("click", () => {
+    window.open(
+        window.location.href,
+        "SoundStationPlayer",
+        "width=450,height=700,resizable=yes"
+    );
+});
+
+document.addEventListener("DOMContentLoaded", () => {
+    const discordBtn = document.querySelector(".discord-btn");
+
+    if (discordBtn) {
+        discordBtn.addEventListener("click", () => {
+            window.open(
+                "https://discord.gg/njVgKx9m9C",
+                "_blank",
+                "noopener,noreferrer"
+            );
+        });
+    }
+});
+
 window.addEventListener(
     "load",
     function () {
